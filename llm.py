@@ -144,41 +144,6 @@ def create_dataloader_v1(txt: list[str], batch_size=4, max_length=256,
     return dataloader
 
 
-def main():
-    with open('the-verdict.txt', 'r', encoding='utf-8') as f:
-        raw_text = f.read()
-    max_length = 4
-    vocab_size = 50257
-    output_dim = 256
-    dataloader = create_dataloader_v1(raw_text, batch_size=8,
-                                       max_length=max_length, shuffle=False)
-
-    token_embedding_layer = torch.nn.Embedding(vocab_size, output_dim)
-    pos_embedding_layer = torch.nn.Embedding(max_length, output_dim)
-    data_iter = iter(dataloader)
-    inputs, targets = next(data_iter)
-    token_embeddings = token_embedding_layer(inputs)
-    pos_embeddings = pos_embedding_layer(torch.arange(max_length))
-    input_embeddings = token_embeddings + pos_embeddings
-    torch.manual_seed(30)
-    inputs = torch.tensor(
-        [[0.43, 0.15, 0.89], # Your     (x^1)
-        [0.55, 0.87, 0.66], # journey  (x^2)
-        [0.57, 0.85, 0.64], # starts   (x^3)
-        [0.22, 0.58, 0.33], # with     (x^4)
-        [0.77, 0.25, 0.10], # one      (x^5)
-        [0.05, 0.80, 0.55]] # step     (x^6)
-        )
-    batch = torch.stack((inputs, inputs), dim=0)
-    print(batch.shape)
-    context_length = batch.shape[1]
-    d_in, d_out = 3, 2
-    mha = MultiHeadAttentionWrapper(d_in, d_out, context_length, 0.0, num_heads=2)
-    context_vecs = mha(batch)
-    print(context_vecs)
-    print(context_vecs.shape)
-
-
 class GPTModel(nn.Module):
     def __init__(self, cfg: dict[str, Any]) -> None:
         super().__init__()
@@ -201,22 +166,6 @@ class GPTModel(nn.Module):
         x = self.final_norm(x)
         logits = self.out_head(x)
         return logits
-
-
-class DummyTransformerBlock(nn.Module):
-    def __init__(self, cfg: dict[str, Any]) -> None:
-        super().__init__()
-    
-    def forward(self, x: Tensor) -> Tensor:
-        return x
-
-
-class DummyLayerNorm(nn.Module):
-    def __init__(self, normalized_shape, eps=1e-5) -> None:
-        super().__init__()
-
-    def forward(self, x: Tensor) -> Tensor:
-        return x
 
 
 class LayerNorm(nn.Module):
@@ -290,7 +239,49 @@ class TransformerBlock(nn.Module):
         return x
 
 
+def generate_text(model, idx: Tensor, max_new_tokens: int, context_size: int) -> Tensor:
+    for _ in range(max_new_tokens):
+        idx_cond = idx[:, -context_size]
+        with torch.no_grad():
+            logits = model(idx_cond)
+        logits = logits[:, -1, :]
+        probs = torch.softmax(logits, dim=-1)
+        idx_next = torch.argmax(probs, dim=-1, keepdim=True)
+        idx = torch.cat((idx, idx_next), dim=1)
+    return idx
 
+
+def main():
+    with open('the-verdict.txt', 'r', encoding='utf-8') as f:
+        raw_text = f.read()
+    tokenizer = tiktoken.get_encoding("gpt2")
+    batch = []
+    txt1 = "Every effort moves you"
+    txt2 = "Every day holds a"
+    batch.append(torch.tensor(tokenizer.encode(txt1)))
+    batch.append(torch.tensor(tokenizer.encode(txt2)))
+    batch = torch.stack(batch, dim=0)
+    assert batch == Tensor([[6109, 3626, 6100, 345], [6109, 1110, 6622, 257]])
+
+    torch.manual_seed(30)
+    model = GPTModel(GPT_CONFIG_124M)
+    logits = model(batch)
+    params = sum(p.numel() for p in model.parameters())
+    tp = params - sum(p.numel() for p in model.out_head.parameters())
+    print(f"output shape: {logits.shape}\n{logits}")
+    print(f"total params: {params}")
+    print(f"total trainable params: {tp}")
+
+    start_context = "Hello, I am"
+    encoded = tokenizer.encode(start_context)
+    encoded_tensor = torch.tensor(encoded).unsqueeze(0)
+    model.eval()
+    out = generate_text(model, idx=encoded_tensor, max_new_tokens=6,
+                        context_size=GPT_CONFIG_124M['context_length'])
+
+    print(f"output length: {len(out[0])}\noutput:{out}")
+    decoded_text = tokenizer.decode(out.squeeze(0).tolist())
+    print(decoded_text)
 
 if __name__ == '__main__':
     main()
