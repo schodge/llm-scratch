@@ -1,6 +1,36 @@
 from typing import Any
 from torch import Tensor, nn
 import torch
+
+class SimpleTokenizerV2:
+    def __init__(self, vocab: dict[str, int]) -> None:
+        self.str_to_int = vocab
+        self.int_to_str = {v: k for k, v in vocab.items()}
+    
+    def encode(self, text: str) -> list[int]:
+        prep = re.split(r'([,.?_!"()\']|--|\s)', text)
+        cleaned = [item.strip() for item in prep if item.strip()]
+        final = [item if item in self.str_to_int else "<|unk|>" for item in cleaned]
+        ids = [self.str_to_int(x) for x in cleaned]
+        return ids
+    
+    def decode(self, ids: list[int]) -> list[str]:
+        text = ' '.join([self.int_to_str(x) for x in ids])
+        cleaned_text = re.sub(r'\s+([,.?!"()\'])', r'\1', text)
+        return text
+
+
+class SimpleTokenizerV3:
+    def __init__(self) -> None:
+        self.tokenizer = tiktoken.get_encoding('gpt2')
+
+    def encode(self, text: list[str], allowed_special={"<|endoftext|>"}) -> list[int]:
+        return self.tokenizer.encode(text, allowed_special=allowed_special)
+    
+    def decode(self, ids: list[int]) -> list[str]:
+        return self.tokenizer.decode(ids)
+    
+
 class CausalAttention(nn.Module):
     def __init__(self, d_in: int, d_out: int, context_length: int,
                   dropout: float, qkv_bias: bool = False) -> None:

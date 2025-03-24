@@ -10,7 +10,8 @@ import tiktoken
 
 
 # Import from local files
-from llm import GPTModel, create_dataloader_v1, generate_text
+from llm import GPTModel
+from llm import create_dataloader_v1, generate_text
 
 
 def text_to_token_ids(text, tokenizer):

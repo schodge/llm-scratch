@@ -101,7 +101,7 @@ def train_model(model: GPTModel, train_loader: DataLoader, val_loader: DataLoade
     return train_losses, val_losses, track_tokens_seen
 
 
-def plot_losses(epochs_seen, tokens_seen, train_losses, val_losses):
+def plot_losses(epochs_seen, tokens_seen, train_losses, val_losses, save: bool = False):
     fig, ax1 = plt.subplots(figsize=(5, 3))
     ax1.plot(epochs_seen, train_losses, label='training loss')
     ax1.plot(epochs_seen, val_losses, linestyle='-.', label='validation loss')
@@ -114,6 +114,8 @@ def plot_losses(epochs_seen, tokens_seen, train_losses, val_losses):
     ax2.set_label('tokens seen')
     fig.tight_layout()
     plt.show()
+    if save:
+        plt.savefig("loss.pdf")
 
 
 def main():
@@ -157,7 +159,19 @@ def main():
         tokenizer=tokenizer
     )
     epochs_tensor = torch.linspace(0, num_epochs, len(train_losses))
-    plot_losses(epochs_tensor, tokens_seen, train_losses, val_losses)
+    plot_losses(epochs_tensor, tokens_seen, train_losses, val_losses, save=True)
+    torch.save({
+        'model_state_dict': model.state_dict(),
+         'optimizer_state_dict': optimizer.state_dict(),
+          }, 'model_and_optimizer.pth')
+    # load code
+    # checkpoint = torch.load('model_and_optimizer.pth', map_location=device)
+    # model = GPTModel(GPT_CONFIG_124M)
+    # model.load_state_dict(checkpoint['model_state_dict'])
+    # optimizer = torch.optim.AdamW(model.parameters(), lr=5e-4, weight_decay=0.1)
+    # optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+    # model.train()
+
 
 if __name__ == '__main__':
     main()

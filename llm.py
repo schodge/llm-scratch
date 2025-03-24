@@ -1,4 +1,4 @@
-from typing import Any
+from typing import Any, Optional
 import re
 import tiktoken
 import torch
@@ -6,49 +6,10 @@ import torch.nn as nn
 from torch import Tensor
 from torch.utils.data import Dataset, DataLoader
 
-GPT_CONFIG_124M = {
-    'vocab_size': 50257,
-    'context_length': 1024,
-    'emb_dim': 768,
-    'n_heads': 12,
-    'n_layers': 12,
-    'drop_rate': 0.1,
-    'qkv_bias': False
-}
-
-
-class SimpleTokenizerV2:
-    def __init__(self, vocab: dict[str, int]) -> None:
-        self.str_to_int = vocab
-        self.int_to_str = {v: k for k, v in vocab.items()}
-    
-    def encode(self, text: str) -> list[int]:
-        prep = re.split(r'([,.?_!"()\']|--|\s)', text)
-        cleaned = [item.strip() for item in prep if item.strip()]
-        final = [item if item in self.str_to_int else "<|unk|>" for item in cleaned]
-        ids = [self.str_to_int(x) for x in cleaned]
-        return ids
-    
-    def decode(self, ids: list[int]) -> list[str]:
-        text = ' '.join([self.int_to_str(x) for x in ids])
-        cleaned_text = re.sub(r'\s+([,.?!"()\'])', r'\1', text)
-        return text
-
-
-class SimpleTokenizerV3:
-    def __init__(self) -> None:
-        self.tokenizer = tiktoken.get_encoding('gpt2')
-
-    def encode(self, text: list[str], allowed_special={"<|endoftext|>"}) -> list[int]:
-        return self.tokenizer.encode(text, allowed_special=allowed_special)
-    
-    def decode(self, ids: list[int]) -> list[str]:
-        return self.tokenizer.decode(ids)
-
 
 
 class GPTDatasetV1(Dataset):
-    def __init__(self, txt: list[str], tokenizer: SimpleTokenizerV3, max_length: int, stride: int) -> None:
+    def __init__(self, txt: list[str], tokenizer, max_length: int, stride: int) -> None:
         self.input_ids: list[int] = []
         self.target_ids: list[int] = []
         token_ids = tokenizer.encode(txt, allowed_special={"<|endoftext|>"})
@@ -65,6 +26,19 @@ class GPTDatasetV1(Dataset):
         return (self.input_ids[idx], self.target_ids[idx])
 
 
+def create_dataloader_v1(txt: list[str], batch_size=4, max_length=256,
+                         stride=128, shuffle=True, drop_last=True,
+                         num_workers=0) -> DataLoader:
+    tokenizer = tiktoken.get_encoding('gpt2')
+    dataset = GPTDatasetV1(txt, tokenizer, max_length, stride)
+    dataloader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=shuffle,
+        drop_last=drop_last,
+        num_workers=num_workers
+    )
+    return dataloader
 
 
 class MultiHeadAttentionWrapper(nn.Module):
@@ -105,35 +79,18 @@ class MultiHeadAttentionWrapper(nn.Module):
         return context_vec
 
 
-def create_dataloader_v1(txt: list[str], batch_size=4, max_length=256,
-                         stride=128, shuffle=True, drop_last=True,
-                         num_workers=0) -> DataLoader:
-    dataset = GPTDatasetV1(txt, SimpleTokenizerV3(), max_length, stride)
-    dataloader = DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=shuffle,
-        drop_last=drop_last,
-        num_workers=num_workers
-    )
-    return dataloader
-
-
-
-
-
 class LayerNorm(nn.Module):
     def __init__(self, emb_dim: tuple[int, int]) -> None:
         super().__init__()
         self.eps = 1e-5
         self.scale = nn.Parameter(torch.ones(emb_dim))
-        self.bias = nn.Parameter(torch.zeros(emb_dim))
+        self.shift = nn.Parameter(torch.zeros(emb_dim))
 
     def forward(self, x: Tensor) -> Tensor:
         mean = x.mean(dim=-1, keepdim=True)
         var = x.var(dim=-1, keepdim=True, unbiased=False)
         norm_x = (x - mean) / torch.sqrt(var + self.eps)
-        return self.scale * norm_x + self.bias
+        return self.scale * norm_x + self.shift
 
 
 class GELU(nn.Module):
@@ -141,10 +98,10 @@ class GELU(nn.Module):
         super().__init__()
 
     def forward(self, x: Tensor) -> Tensor:
-        temp = 0.5 * x * (
-            1 + 
-            torch.tanh(torch.sqrt(torch.tensor(2. / torch.pi)) *
-                       (x + 0.044715 * torch.pow(x, 3))))
+        temp = 0.5 * x * (1 + torch.tanh(
+            torch.sqrt(torch.tensor(2.0 / torch.pi)) *
+            (x + 0.044715 * torch.pow(x, 3))
+        ))
         return temp
 
 
@@ -155,7 +112,6 @@ class FeedForward(nn.Module):
             nn.Linear(cfg['emb_dim'], 4 * cfg['emb_dim']),
             GELU(),
             nn.Linear(4 * cfg['emb_dim'], cfg['emb_dim']),
-            #nn.Dropout()
         )
     
     def forward(self, x: Tensor) -> Tensor:
@@ -170,8 +126,8 @@ class TransformerBlock(nn.Module):
             d_out=cfg['emb_dim'],
             context_length=cfg['context_length'],
             num_heads=cfg['n_heads'],
-            qkv_bias=cfg['qkv_bias'],
-            dropout=cfg['drop_rate']
+            dropout=cfg['drop_rate'],
+            qkv_bias=cfg['qkv_bias']
         )
         self.ff = FeedForward(cfg)
         self.norm1 = LayerNorm(cfg['emb_dim'])
@@ -184,10 +140,10 @@ class TransformerBlock(nn.Module):
         x = self.att(x)
         x = self.drop_shortcut(x)
         x = x + shortcut
-        
+
         shortcut = x
         x = self.norm2(x)
-        x = self.att(x)
+        x = self.ff(x)
         x = self.drop_shortcut(x)
         x = x + shortcut
         return x
@@ -215,18 +171,45 @@ class GPTModel(nn.Module):
         x = self.final_norm(x)
         logits = self.out_head(x)
         return logits
-def generate_text(model, idx: Tensor, max_new_tokens: int, context_size: int) -> Tensor:
+
+
+def generate_text(model, idx: Tensor, max_new_tokens: int, context_size: int,
+                  temperature: float = 0.0, top_k: Optional[int] = None, eos_id: Optional[int] = None) -> Tensor:
     for _ in range(max_new_tokens):
         idx_cond = idx[:, -context_size:]
         with torch.no_grad():
-            logits = model(idx_cond)
+            logits: Tensor = model(idx_cond)
         logits = logits[:, -1, :]
-        idx_next = torch.argmax(logits, dim=-1, keepdim=True)
+        if top_k is not None:
+            top_logits, _ = torch.topk(logits, top_k)
+            minval = top_logits[:, -1]
+            logits = torch.where(
+                logits < minval,
+                torch.tensor(float('-inf')).to(logits.device),
+                logits
+            )
+        if temperature > 0:
+            logits /= temperature
+            probs = torch.softmax(logits, dim=-1)
+            idx_next = torch.multinomial(probs, num_samples=1)
+        else:
+            idx_next = torch.argmax(logits, dim=-1, keepdim=True)
+        if idx_next == eos_id:
+            break
         idx = torch.cat((idx, idx_next), dim=1)
     return idx
 
 
 def main():
+    GPT_CONFIG_124M = {
+    'vocab_size': 50257,
+    'context_length': 1024,
+    'emb_dim': 768,
+    'n_heads': 12,
+    'n_layers': 12,
+    'drop_rate': 0.1,
+    'qkv_bias': False
+    }
     with open('the-verdict.txt', 'r', encoding='utf-8') as f:
         raw_text = f.read()
     tokenizer = tiktoken.get_encoding("gpt2")
