@@ -39,8 +39,8 @@ class SimpleTokenizerV3:
     def __init__(self) -> None:
         self.tokenizer = tiktoken.get_encoding('gpt2')
 
-    def encode(self, text: list[str]) -> list[int]:
-        return self.tokenizer.encode(text, allowed_special={"<|endoftext|>"})
+    def encode(self, text: list[str], allowed_special={"<|endoftext|>"}) -> list[int]:
+        return self.tokenizer.encode(text, allowed_special=allowed_special)
     
     def decode(self, ids: list[int]) -> list[str]:
         return self.tokenizer.decode(ids)
@@ -51,7 +51,7 @@ class GPTDatasetV1(Dataset):
     def __init__(self, txt: list[str], tokenizer: SimpleTokenizerV3, max_length: int, stride: int) -> None:
         self.input_ids: list[int] = []
         self.target_ids: list[int] = []
-        token_ids = tokenizer.encode(txt)
+        token_ids = tokenizer.encode(txt, allowed_special={"<|endoftext|>"})
         for i in range(0, len(token_ids) - max_length, stride):
             input_chunk = token_ids[i: i + max_length]
             target_chunk = token_ids[i + 1: i + max_length + 1]
@@ -65,31 +65,7 @@ class GPTDatasetV1(Dataset):
         return (self.input_ids[idx], self.target_ids[idx])
 
 
-class CausalAttention(nn.Module):
-    def __init__(self, d_in: int, d_out: int, context_length: int,
-                  dropout: float, qkv_bias: bool = False) -> None:
-        super().__init__()
-        self.d_out = d_out
-        self.W_query = nn.Linear(d_in, d_out, bias=qkv_bias)
-        self.W_key = nn.Linear(d_in, d_out, bias=qkv_bias)
-        self.W_value = nn.Linear(d_in, d_out, bias=qkv_bias)
-        self.dropout = nn.Dropout(dropout)
-        self.register_buffer('mask',
-                             torch.triu(torch.ones(context_length, context_length), diagonal=1))
 
-    def forward(self, x: Tensor) -> Tensor:
-        b, num_tokens, d_in = x.shape
-        keys = self.W_key(x)
-        queries = self.W_query(x)
-        values = self.W_value(x)
-        attn_scores = queries @ keys.transpose(1, 2)
-        attn_scores.masked_fill_(
-            self.mask.bool()[:num_tokens, :num_tokens], -torch.inf
-        )
-        attn_weights = torch.softmax(attn_scores/keys.shape[-1]**0.5, dim=-1)
-        attn_weights = self.dropout(attn_weights)
-        context_vec = attn_weights @ values
-        return context_vec
 
 class MultiHeadAttentionWrapper(nn.Module):
     def __init__(self, d_in: int, d_out: int, context_length: int,
@@ -104,8 +80,7 @@ class MultiHeadAttentionWrapper(nn.Module):
         self.W_value = nn.Linear(d_in, d_out, bias=qkv_bias)
         self.out_proj = nn.Linear(d_out, d_out)
         self.dropout = nn.Dropout(dropout)
-        self.register_buffer('mask',
-                             torch.triu(torch.ones(context_length, context_length), diagonal=1))
+        self.register_buffer('mask', torch.triu(torch.ones(context_length, context_length), diagonal=1))
 
     def forward(self, x: Tensor) -> Tensor:
         b, num_tokens, d_in = x.shape
@@ -144,28 +119,7 @@ def create_dataloader_v1(txt: list[str], batch_size=4, max_length=256,
     return dataloader
 
 
-class GPTModel(nn.Module):
-    def __init__(self, cfg: dict[str, Any]) -> None:
-        super().__init__()
-        self.tok_emb = nn.Embedding(cfg['vocab_size'], cfg['emb_dim'])
-        self.pos_emb = nn.Embedding(cfg['context_length'], cfg['emb_dim'])
-        self.drop_emb = nn.Dropout(cfg['drop_rate'])
-        self.trf_blocks = nn.Sequential(
-            *[TransformerBlock(cfg) for _ in range(cfg['n_layers'])]
-        )
-        self.final_norm = LayerNorm(cfg['emb_dim'])
-        self.out_head = nn.Linear(cfg['emb_dim'], cfg['vocab_size'], bias=False)
 
-    def forward(self, in_idx: list[Tensor]) -> Tensor:
-        batch_size, seq_len = in_idx.shape
-        tok_embeds = self.tok_emb(in_idx)
-        pos_embeds = self.pos_emb(torch.arange(seq_len, device=in_idx.device))
-        x = tok_embeds + pos_embeds
-        x = self.drop_emb(x)
-        x = self.trf_blocks(x)
-        x = self.final_norm(x)
-        logits = self.out_head(x)
-        return logits
 
 
 class LayerNorm(nn.Module):
@@ -239,14 +193,35 @@ class TransformerBlock(nn.Module):
         return x
 
 
+class GPTModel(nn.Module):
+    def __init__(self, cfg: dict[str, Any]) -> None:
+        super().__init__()
+        self.tok_emb = nn.Embedding(cfg['vocab_size'], cfg['emb_dim'])
+        self.pos_emb = nn.Embedding(cfg['context_length'], cfg['emb_dim'])
+        self.drop_emb = nn.Dropout(cfg['drop_rate'])
+        self.trf_blocks = nn.Sequential(
+            *[TransformerBlock(cfg) for _ in range(cfg['n_layers'])]
+        )
+        self.final_norm = LayerNorm(cfg['emb_dim'])
+        self.out_head = nn.Linear(cfg['emb_dim'], cfg['vocab_size'], bias=False)
+
+    def forward(self, in_idx: list[Tensor]) -> Tensor:
+        batch_size, seq_len = in_idx.shape
+        tok_embeds = self.tok_emb(in_idx)
+        pos_embeds = self.pos_emb(torch.arange(seq_len, device=in_idx.device))
+        x = tok_embeds + pos_embeds
+        x = self.drop_emb(x)
+        x = self.trf_blocks(x)
+        x = self.final_norm(x)
+        logits = self.out_head(x)
+        return logits
 def generate_text(model, idx: Tensor, max_new_tokens: int, context_size: int) -> Tensor:
     for _ in range(max_new_tokens):
-        idx_cond = idx[:, -context_size]
+        idx_cond = idx[:, -context_size:]
         with torch.no_grad():
             logits = model(idx_cond)
         logits = logits[:, -1, :]
-        probs = torch.softmax(logits, dim=-1)
-        idx_next = torch.argmax(probs, dim=-1, keepdim=True)
+        idx_next = torch.argmax(logits, dim=-1, keepdim=True)
         idx = torch.cat((idx, idx_next), dim=1)
     return idx
 
